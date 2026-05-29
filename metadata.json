@@ -1,0 +1,8 @@
+{
+  "name": "Warehouse8",
+  "description": "Verify group attendance and monitor real-time presence for meetings, events, or emergency safety check-ins.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
