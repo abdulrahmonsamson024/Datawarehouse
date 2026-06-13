@@ -1453,6 +1453,46 @@ async function ensureCockroachTables(pool: pg.Pool) {
     console.error("Failed to automatically deploy CockroachDB 'support_messages' schema:", err.message);
   }
 
+  // Verify/auto-create feedback and contactus tables in CockroachDB
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS public.feedback (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        rate INT NOT NULL,
+        user_email VARCHAR(255) NOT NULL,
+        feedback TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        is_read BOOLEAN NOT NULL DEFAULT FALSE
+      );
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_feedback_created_at ON public.feedback (created_at DESC);
+    `);
+    console.log("CockroachDB 'feedback' table verified/auto-created successfully.");
+  } catch (err: any) {
+    console.error("Failed to automatically deploy CockroachDB 'feedback' schema:", err.message);
+  }
+
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS public.contactus (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        fullname VARCHAR(255) NOT NULL,
+        usermail VARCHAR(255) NOT NULL,
+        subject VARCHAR(255) NOT NULL,
+        message TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        is_read BOOLEAN NOT NULL DEFAULT FALSE
+      );
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_contactus_created_at ON public.contactus (created_at DESC);
+    `);
+    console.log("CockroachDB 'contactus' table verified/auto-created successfully.");
+  } catch (err: any) {
+    console.error("Failed to automatically deploy CockroachDB 'contactus' schema:", err.message);
+  }
+
   // Also verify/auto-create the persistent news table in CockroachDB as a highly-available, zero-config layout fallback
   try {
     await pool.query(`
@@ -1504,9 +1544,23 @@ async function ensureCockroachTables(pool: pg.Pool) {
 
   // Verify/auto-create the persistent system_announcements table in CockroachDB
   try {
+    // Drop existing table first if it has a conflicting UUID schema
+    try {
+      const colCheck = await pool.query(`
+        SELECT data_type FROM information_schema.columns 
+        WHERE table_name = 'system_announcements' AND column_name = 'id';
+      `);
+      if (colCheck.rows.length > 0 && colCheck.rows[0].data_type === 'uuid') {
+        await pool.query(`DROP TABLE IF EXISTS public.system_announcements CASCADE;`);
+        console.log("Dropped outdated UUID-based system_announcements table in CockroachDB.");
+      }
+    } catch (colErr) {
+      console.warn("Could not inspect system_announcements schema, continuing:", colErr);
+    }
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS public.system_announcements (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        id VARCHAR(255) PRIMARY KEY DEFAULT (gen_random_uuid())::text,
         enabled BOOLEAN DEFAULT TRUE,
         type VARCHAR(20),
         title VARCHAR(255),
@@ -1517,7 +1571,7 @@ async function ensureCockroachTables(pool: pg.Pool) {
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
     `);
-    const checkCount = await pool.query(`SELECT COUNT(*)::INTEGER as count FROM public.system_announcements;`);
+    const checkCount = await pool.query(`SELECT COUNT(*)::INTEGER as count FROM public.system_announcements;`);;
     if (checkCount.rows[0]?.count === 0) {
       console.log("Seeding 5 default banners to CockroachDB...");
       for (const ann of defaultAnnouncements) {
@@ -1656,11 +1710,77 @@ async function ensureSupabaseTables(pool: pg.Pool) {
     console.error("Failed to automatically deploy Supabase 'support_messages' schema via Postgres:", err.message);
   }
 
-  // Verify/auto-create the persistent system_announcements table in Supabase
+  // Verify/auto-create feedback and contactus tables in Supabase
   try {
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS public.system_announcements (
+      CREATE TABLE IF NOT EXISTS public.feedback (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        rate INT NOT NULL,
+        user_email VARCHAR(255) NOT NULL,
+        feedback TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        is_read BOOLEAN NOT NULL DEFAULT FALSE
+      );
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_feedback_created_at ON public.feedback (created_at DESC);
+    `);
+    try {
+      await pool.query(`
+        ALTER TABLE public.feedback DISABLE ROW LEVEL SECURITY;
+      `);
+      console.log("Row-level security disabled on Supabase feedback successfully.");
+    } catch (_) {}
+    console.log("Supabase 'feedback' table verified/auto-created successfully.");
+  } catch (err: any) {
+    console.error("Failed to automatically deploy Supabase 'feedback' schema via Postgres:", err.message);
+  }
+
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS public.contactus (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        fullname VARCHAR(255) NOT NULL,
+        usermail VARCHAR(255) NOT NULL,
+        subject VARCHAR(255) NOT NULL,
+        message TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        is_read BOOLEAN NOT NULL DEFAULT FALSE
+      );
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_contactus_created_at ON public.contactus (created_at DESC);
+    `);
+    try {
+      await pool.query(`
+        ALTER TABLE public.contactus DISABLE ROW LEVEL SECURITY;
+      `);
+      console.log("Row-level security disabled on Supabase contactus successfully.");
+    } catch (_) {}
+    console.log("Supabase 'contactus' table verified/auto-created successfully.");
+  } catch (err: any) {
+    console.error("Failed to automatically deploy Supabase 'contactus' schema via Postgres:", err.message);
+  }
+
+  // Verify/auto-create the persistent system_announcements table in Supabase
+  try {
+    // Drop existing table first if it has a conflicting UUID schema
+    try {
+      const colCheck = await pool.query(`
+        SELECT data_type FROM information_schema.columns 
+        WHERE table_name = 'system_announcements' AND column_name = 'id';
+      `);
+      if (colCheck.rows.length > 0 && colCheck.rows[0].data_type === 'uuid') {
+        await pool.query(`DROP TABLE IF EXISTS public.system_announcements CASCADE;`);
+        console.log("Dropped outdated UUID-based system_announcements table in Supabase.");
+      }
+    } catch (colErr) {
+      console.warn("Could not inspect system_announcements schema, continuing:", colErr);
+    }
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS public.system_announcements (
+        id VARCHAR(255) PRIMARY KEY DEFAULT (gen_random_uuid())::text,
         enabled BOOLEAN DEFAULT TRUE,
         type VARCHAR(20),
         title VARCHAR(255),
@@ -1677,7 +1797,7 @@ async function ensureSupabaseTables(pool: pg.Pool) {
       `);
     } catch (_) {}
 
-    const checkCount = await pool.query(`SELECT COUNT(*)::INTEGER as count FROM public.system_announcements;`);
+    const checkCount = await pool.query(`SELECT COUNT(*)::INTEGER as count FROM public.system_announcements;`);;
     if (checkCount.rows[0]?.count === 0) {
       console.log("Seeding 5 default banners to Supabase DB...");
       for (const ann of defaultAnnouncements) {
@@ -2387,7 +2507,10 @@ async function startServer() {
   // --- CLIENT SUPPORT WORKFLOW API (SECURED BY FOREX_API_SECRET BEARER) ---
   app.post("/api/support/message", async (req: Request, res: Response) => {
     const authHeader = req.headers.authorization || "";
-    const forexSecret = process.env.FOREX_API_SECRET ? process.env.FOREX_API_SECRET.trim() : "secret!";
+    const forexSecret = process.env.FOREX_API_SECRET ? process.env.FOREX_API_SECRET.trim() : "";
+    if (!forexSecret) {
+      return res.status(401).json({ error: "Unauthorized access. FOREX_API_SECRET is not configured on the server." });
+    }
     
     const token = authHeader.replace(/^Bearer\s+/i, "").trim();
     if (token !== forexSecret) {
@@ -2491,6 +2614,268 @@ async function startServer() {
     }
   });
 
+  app.post("/api/admin/remote/support/clear-all", async (req: Request, res: Response) => {
+    try {
+      await clearAllSupportMessages();
+      return res.json({ status: "success" });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- FEEDBACK & CONTACT US STATES & ENDPOINTS (SECURED BY FOREX_API_SECRET) ---
+  let localFeedback: any[] = [];
+  let localContactUs: any[] = [];
+
+  // Helper to verify FOREX_API_SECRET
+  function isForexSecretValid(req: Request): boolean {
+    const authHeader = req.headers.authorization || "";
+    const forexSecret = process.env.FOREX_API_SECRET ? process.env.FOREX_API_SECRET.trim() : "";
+    if (!forexSecret) return false;
+    const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+    if (token === forexSecret) return true;
+
+    // Check in query or body as fallback for absolute flexibility
+    const querySecret = req.query.secret || req.body.secret;
+    if (querySecret && String(querySecret).trim() === forexSecret) return true;
+
+    // Check in x-api-secret header
+    const backupHeader = req.headers["x-api-secret"];
+    if (backupHeader && String(backupHeader).trim() === forexSecret) return true;
+
+    return false;
+  }
+
+  // --- FEEDBACK API ---
+  // Public Feedbacks Post
+  app.post("/api/feedback", async (req: Request, res: Response) => {
+    const { rate, user_email, feedback } = req.body;
+    if (rate === undefined || !user_email || !feedback) {
+      return res.status(400).json({ error: "Missing 'rate', 'user_email' or 'feedback' parameters." });
+    }
+
+    const rateVal = parseInt(String(rate)) || 5;
+    const emailVal = String(user_email).trim().toLowerCase();
+    const feedbackVal = String(feedback).trim();
+    const id = crypto.randomUUID ? crypto.randomUUID() : "fb-" + Date.now() + "-" + Math.random().toString(36).substring(2, 7);
+
+    try {
+      await queryDatabaseUnified(
+        "INSERT INTO public.feedback (id, rate, user_email, feedback, is_read, created_at) VALUES ($1, $2, $3, $4, FALSE, NOW())",
+        [id, rateVal, emailVal, feedbackVal]
+      );
+      return res.json({ status: "success", message: "Feedback inserted into database successfully.", id });
+    } catch (dbErr: any) {
+      console.warn("DB Feedback insertion failed, storing in in-memory list:", dbErr.message);
+      const row = {
+        id,
+        rate: rateVal,
+        user_email: emailVal,
+        feedback: feedbackVal,
+        is_read: false,
+        created_at: new Date().toISOString()
+      };
+      localFeedback.push(row);
+      return res.json({ status: "success", message: "Feedback saved locally (DB Offline).", id, data: row });
+    }
+  });
+
+  // Admin GET feedbacks
+  app.get("/api/admin/feedback", async (req: Request, res: Response) => {
+    if (!isForexSecretValid(req)) {
+      return res.status(401).json({ error: "Unauthorized access. Invalid FOREX_API_SECRET client signature." });
+    }
+
+    try {
+      const rows = await queryDatabaseUnified(
+        "SELECT id, rate, user_email, feedback, is_read, created_at FROM public.feedback ORDER BY created_at DESC"
+      );
+      // Merge with corresponding local records if any to avoid gaps
+      const uniqueRows = [...rows];
+      for (const loc of localFeedback) {
+        if (!uniqueRows.some(r => r.id === loc.id)) {
+          uniqueRows.push(loc);
+        }
+      }
+      uniqueRows.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      return res.json(uniqueRows);
+    } catch (err: any) {
+      return res.json(localFeedback.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()));
+    }
+  });
+
+  // Admin Mark Feedback Read
+  app.post("/api/admin/feedback/mark-read", async (req: Request, res: Response) => {
+    if (!isForexSecretValid(req)) {
+      return res.status(401).json({ error: "Unauthorized access. Invalid FOREX_API_SECRET client signature." });
+    }
+
+    const { id } = req.body;
+    if (!id) {
+      return res.status(400).json({ error: "Missing required 'id' parameter." });
+    }
+
+    try {
+      await queryDatabaseUnified("UPDATE public.feedback SET is_read = TRUE WHERE id = $1", [id]);
+    } catch (err) {}
+
+    // Also update local in-memory
+    const idx = localFeedback.findIndex(f => f.id === id);
+    if (idx !== -1) {
+      localFeedback[idx].is_read = true;
+    }
+
+    return res.json({ status: "success" });
+  });
+
+  // Admin Delete Feedback
+  app.post("/api/admin/feedback/delete", async (req: Request, res: Response) => {
+    if (!isForexSecretValid(req)) {
+      return res.status(401).json({ error: "Unauthorized access. Invalid FOREX_API_SECRET client signature." });
+    }
+
+    const { id } = req.body;
+    if (!id) {
+      return res.status(400).json({ error: "Missing required 'id' parameter." });
+    }
+
+    try {
+      await queryDatabaseUnified("DELETE FROM public.feedback WHERE id = $1", [id]);
+    } catch (err) {}
+
+    localFeedback = localFeedback.filter(f => f.id !== id);
+    return res.json({ status: "success" });
+  });
+
+  // Admin Clear All feedback
+  app.post("/api/admin/feedback/clear-all", async (req: Request, res: Response) => {
+    if (!isForexSecretValid(req)) {
+      return res.status(401).json({ error: "Unauthorized access. Invalid FOREX_API_SECRET client signature." });
+    }
+
+    try {
+      await queryDatabaseUnified("DELETE FROM public.feedback");
+    } catch (err) {}
+
+    localFeedback = [];
+    return res.json({ status: "success" });
+  });
+
+  // --- CONTACT US API ---
+  // Public submission
+  app.post("/api/contact", async (req: Request, res: Response) => {
+    const { fullname, usermail, subject, message } = req.body;
+    if (!fullname || !usermail || !subject || !message) {
+      return res.status(400).json({ error: "Missing required fields: fullname, usermail, subject, message." });
+    }
+
+    const nameVal = String(fullname).trim();
+    const mailVal = String(usermail).trim().toLowerCase();
+    const subjVal = String(subject).trim();
+    const msgVal = String(message).trim();
+    const id = crypto.randomUUID ? crypto.randomUUID() : "cu-" + Date.now() + "-" + Math.random().toString(36).substring(2, 7);
+
+    try {
+      await queryDatabaseUnified(
+        "INSERT INTO public.contactus (id, fullname, usermail, subject, message, is_read, created_at) VALUES ($1, $2, $3, $4, $5, FALSE, NOW())",
+        [id, nameVal, mailVal, subjVal, msgVal]
+      );
+      return res.json({ status: "success", message: "Contact request submitted successfully.", id });
+    } catch (dbErr: any) {
+      console.warn("DB Contact insertion failed, storing in in-memory list:", dbErr.message);
+      const row = {
+        id,
+        fullname: nameVal,
+        usermail: mailVal,
+        subject: subjVal,
+        message: msgVal,
+        is_read: false,
+        created_at: new Date().toISOString()
+      };
+      localContactUs.push(row);
+      return res.json({ status: "success", message: "Contact request saved locally (DB Offline).", id, data: row });
+    }
+  });
+
+  // Admin GET Contacts
+  app.get("/api/admin/contact", async (req: Request, res: Response) => {
+    if (!isForexSecretValid(req)) {
+      return res.status(401).json({ error: "Unauthorized access. Invalid FOREX_API_SECRET client signature." });
+    }
+
+    try {
+      const rows = await queryDatabaseUnified(
+        "SELECT id, fullname, usermail, subject, message, is_read, created_at FROM public.contactus ORDER BY created_at DESC"
+      );
+      const uniqueRows = [...rows];
+      for (const loc of localContactUs) {
+        if (!uniqueRows.some(r => r.id === loc.id)) {
+          uniqueRows.push(loc);
+        }
+      }
+      uniqueRows.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      return res.json(uniqueRows);
+    } catch (err: any) {
+      return res.json(localContactUs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()));
+    }
+  });
+
+  // Admin Mark Contact Read
+  app.post("/api/admin/contact/mark-read", async (req: Request, res: Response) => {
+    if (!isForexSecretValid(req)) {
+      return res.status(401).json({ error: "Unauthorized access. Invalid FOREX_API_SECRET client signature." });
+    }
+
+    const { id } = req.body;
+    if (!id) {
+      return res.status(400).json({ error: "Missing required 'id' parameter." });
+    }
+
+    try {
+      await queryDatabaseUnified("UPDATE public.contactus SET is_read = TRUE WHERE id = $1", [id]);
+    } catch (err) {}
+
+    const idx = localContactUs.findIndex(c => c.id === id);
+    if (idx !== -1) {
+      localContactUs[idx].is_read = true;
+    }
+
+    return res.json({ status: "success" });
+  });
+
+  // Admin Delete Contact
+  app.post("/api/admin/contact/delete", async (req: Request, res: Response) => {
+    if (!isForexSecretValid(req)) {
+      return res.status(401).json({ error: "Unauthorized access. Invalid FOREX_API_SECRET client signature." });
+    }
+
+    const { id } = req.body;
+    if (!id) {
+      return res.status(400).json({ error: "Missing required 'id' parameter." });
+    }
+
+    try {
+      await queryDatabaseUnified("DELETE FROM public.contactus WHERE id = $1", [id]);
+    } catch (err) {}
+
+    localContactUs = localContactUs.filter(c => c.id !== id);
+    return res.json({ status: "success" });
+  });
+
+  // Admin Clear All Contacts
+  app.post("/api/admin/contact/clear-all", async (req: Request, res: Response) => {
+    if (!isForexSecretValid(req)) {
+      return res.status(401).json({ error: "Unauthorized access. Invalid FOREX_API_SECRET client signature." });
+    }
+
+    try {
+      await queryDatabaseUnified("DELETE FROM public.contactus");
+    } catch (err) {}
+
+    localContactUs = [];
+    return res.json({ status: "success" });
+  });
+
   // 1. Permanent User Deletion (DELETE /api/admin/users/:userId)
   app.delete("/api/admin/users/:userId", async (req: Request, res: Response) => {
     const userId = req.params.userId;
@@ -2502,10 +2887,10 @@ async function startServer() {
       providedSecret = String(req.headers["x-api-secret"]).trim();
     }
 
-    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY || "secret!");
-    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET || "secret!");
+    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY);
+    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET);
 
-    if (!providedSecret || (providedSecret !== wipeSecret && providedSecret !== forexSecret)) {
+    if (!providedSecret || ((!wipeSecret || providedSecret !== wipeSecret) && (!forexSecret || providedSecret !== forexSecret))) {
       return res.status(401).json({ error: "Unauthorized: Invalid or missing administrative authorization token." });
     }
 
@@ -2513,8 +2898,8 @@ async function startServer() {
     if (adminApiUrl.startsWith('"') || adminApiUrl.startsWith("'")) {
       adminApiUrl = adminApiUrl.replace(/^['"]|['"]$/g, "").trim();
     }
-    if (!adminApiUrl || adminApiUrl.includes("yourdomain.com") || adminApiUrl.includes("api.yourdomain.com")) {
-      adminApiUrl = "https://firstlook-4iwh.onrender.com/api/admin";
+    if (!adminApiUrl) {
+      return res.status(400).json({ error: "ADMIN_API_URL is required but not configured." });
     }
     // Normalize url
     try {
@@ -2581,10 +2966,10 @@ async function startServer() {
       providedSecret = String(req.headers["x-api-secret"]).trim();
     }
 
-    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY || "secret!");
-    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET || "secret!");
+    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY);
+    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET);
 
-    if (!providedSecret || (providedSecret !== wipeSecret && providedSecret !== forexSecret)) {
+    if (!providedSecret || ((!wipeSecret || providedSecret !== wipeSecret) && (!forexSecret || providedSecret !== forexSecret))) {
       return res.status(401).json({ error: "Unauthorized: Invalid or missing administrative authorization token." });
     }
 
@@ -2592,8 +2977,8 @@ async function startServer() {
     if (adminApiUrl.startsWith('"') || adminApiUrl.startsWith("'")) {
       adminApiUrl = adminApiUrl.replace(/^['"]|['"]$/g, "").trim();
     }
-    if (!adminApiUrl || adminApiUrl.includes("yourdomain.com") || adminApiUrl.includes("api.yourdomain.com")) {
-      adminApiUrl = "https://firstlook-4iwh.onrender.com/api/admin";
+    if (!adminApiUrl) {
+      return res.status(400).json({ error: "ADMIN_API_URL is required but not configured." });
     }
     // Normalize url
     try {
@@ -2660,10 +3045,10 @@ async function startServer() {
       providedSecret = String(req.headers["x-api-secret"]).trim();
     }
 
-    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY || "secret!");
-    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET || "secret!");
+    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY);
+    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET);
 
-    if (!providedSecret || (providedSecret !== wipeSecret && providedSecret !== forexSecret)) {
+    if (!providedSecret || ((!wipeSecret || providedSecret !== wipeSecret) && (!forexSecret || providedSecret !== forexSecret))) {
       return res.status(401).json({ error: "Unauthorized: Invalid or missing administrative authorization token." });
     }
 
@@ -2676,8 +3061,8 @@ async function startServer() {
     if (adminApiUrl.startsWith('"') || adminApiUrl.startsWith("'")) {
       adminApiUrl = adminApiUrl.replace(/^['"]|['"]$/g, "").trim();
     }
-    if (!adminApiUrl || adminApiUrl.includes("yourdomain.com") || adminApiUrl.includes("api.yourdomain.com")) {
-      adminApiUrl = "https://firstlook-4iwh.onrender.com/api/admin";
+    if (!adminApiUrl) {
+      return res.status(400).json({ error: "ADMIN_API_URL is required but not configured." });
     }
 
     // Normalize url
@@ -2776,6 +3161,93 @@ async function startServer() {
     }
   });
 
+  // 3.5 Send Email Proxy Endpoint (POST /api/admin/send-email)
+  app.post("/api/admin/send-email", async (req: Request, res: Response) => {
+    const authHeader = req.headers.authorization;
+    let providedSecret = "";
+    if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
+      providedSecret = authHeader.substring(7).trim();
+    } else if (req.headers["x-api-secret"]) {
+      providedSecret = String(req.headers["x-api-secret"]).trim();
+    }
+
+    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY);
+    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET);
+
+    if (!providedSecret || ((!wipeSecret || providedSecret !== wipeSecret) && (!forexSecret || providedSecret !== forexSecret))) {
+      return res.status(401).json({ error: "Unauthorized: Invalid or missing administrative authorization token." });
+    }
+
+    const { subject, message, recipients } = req.body;
+    if (!subject || !message || !recipients) {
+      return res.status(400).json({ error: "Subject, message, and recipients are required and cannot be empty." });
+    }
+
+    let adminApiUrl = process.env.ADMIN_API_URL ? process.env.ADMIN_API_URL.trim() : "";
+    if (adminApiUrl.startsWith('"') || adminApiUrl.startsWith("'")) {
+      adminApiUrl = adminApiUrl.replace(/^['"]|['"]$/g, "").trim();
+    }
+    if (!adminApiUrl) {
+      return res.status(400).json({ error: "ADMIN_API_URL is required but not configured." });
+    }
+
+    // Normalize url
+    try {
+      if (adminApiUrl) {
+        const parsedUrl = new URL(adminApiUrl);
+        if (parsedUrl.pathname === "/" || parsedUrl.pathname === "") {
+          adminApiUrl = parsedUrl.origin + "/api/admin";
+        } else if (!parsedUrl.pathname.includes("/admin")) {
+          if (parsedUrl.pathname.endsWith("/api")) {
+            adminApiUrl = adminApiUrl.replace(/\/+$/, "") + "/admin";
+          } else {
+            adminApiUrl = adminApiUrl.replace(/\/+$/, "") + "/api/admin";
+          }
+        }
+      }
+    } catch {
+      if (adminApiUrl.startsWith("http")) {
+        if (!adminApiUrl.includes("/api/admin") && !adminApiUrl.includes("/admin")) {
+          adminApiUrl = adminApiUrl.replace(/\/+$/, "") + "/api/admin";
+        }
+      }
+    }
+
+    const cleanBaseUrl = adminApiUrl.endsWith("/") ? adminApiUrl.slice(0, -1) : adminApiUrl;
+    const targetUrl = `${cleanBaseUrl}/send-email`;
+
+    try {
+      console.log(`[AdminEmail] Proxying email to ${typeof recipients === "string" ? recipients : recipients.length + " users"} via target URL: ${targetUrl}`);
+      const remoteRes = await fetch(targetUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${forexSecret}`,
+          "X-API-Secret": forexSecret,
+          "x-api-secret": forexSecret
+        },
+        body: JSON.stringify({
+          api_secret: forexSecret,
+          subject,
+          message,
+          recipients
+        }),
+        signal: AbortSignal.timeout(30000)
+      });
+
+      if (!remoteRes.ok) {
+        const errData = await remoteRes.json().catch(() => ({}));
+        return res.status(remoteRes.status).json({ error: errData.error || `Remote server returned error status ${remoteRes.status}` });
+      }
+
+      const data = await remoteRes.json();
+      return res.json(data);
+    } catch (err: any) {
+      console.error("[AdminEmail] Failed proxying direct email:", err);
+      return res.status(500).json({ error: `Connection failed: ${err.message}` });
+    }
+  });
+
   // 4. View All Watchlist Items of a Specific User (GET /api/admin/users/:userId/watchlist)
   app.get("/api/admin/users/:userId/watchlist", async (req: Request, res: Response) => {
     const userId = req.params.userId;
@@ -2787,10 +3259,10 @@ async function startServer() {
       providedSecret = String(req.headers["x-api-secret"]).trim();
     }
 
-    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY || "secret!");
-    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET || "secret!");
+    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY);
+    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET);
 
-    if (!providedSecret || (providedSecret !== wipeSecret && providedSecret !== forexSecret)) {
+    if (!providedSecret || ((!wipeSecret || providedSecret !== wipeSecret) && (!forexSecret || providedSecret !== forexSecret))) {
       return res.status(401).json({ error: "Unauthorized: Invalid or missing administrative authorization token." });
     }
 
@@ -2798,8 +3270,8 @@ async function startServer() {
     if (adminApiUrl.startsWith('"') || adminApiUrl.startsWith("'")) {
       adminApiUrl = adminApiUrl.replace(/^['"]|['"]$/g, "").trim();
     }
-    if (!adminApiUrl || adminApiUrl.includes("yourdomain.com") || adminApiUrl.includes("api.yourdomain.com")) {
-      adminApiUrl = "https://firstlook-4iwh.onrender.com/api/admin";
+    if (!adminApiUrl) {
+      return res.status(400).json({ error: "ADMIN_API_URL is required but not configured." });
     }
 
     // Normalize
@@ -2863,10 +3335,10 @@ async function startServer() {
       providedSecret = String(req.headers["x-api-secret"]).trim();
     }
 
-    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY || "secret!");
-    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET || "secret!");
+    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY);
+    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET);
 
-    if (!providedSecret || (providedSecret !== wipeSecret && providedSecret !== forexSecret)) {
+    if (!providedSecret || ((!wipeSecret || providedSecret !== wipeSecret) && (!forexSecret || providedSecret !== forexSecret))) {
       return res.status(401).json({ error: "Unauthorized: Invalid or missing administrative authorization token." });
     }
 
@@ -2874,8 +3346,8 @@ async function startServer() {
     if (adminApiUrl.startsWith('"') || adminApiUrl.startsWith("'")) {
       adminApiUrl = adminApiUrl.replace(/^['"]|['"]$/g, "").trim();
     }
-    if (!adminApiUrl || adminApiUrl.includes("yourdomain.com") || adminApiUrl.includes("api.yourdomain.com")) {
-      adminApiUrl = "https://firstlook-4iwh.onrender.com/api/admin";
+    if (!adminApiUrl) {
+      return res.status(400).json({ error: "ADMIN_API_URL is required but not configured." });
     }
 
     // Normalize
@@ -2939,10 +3411,10 @@ async function startServer() {
       providedSecret = String(req.headers["x-api-secret"]).trim();
     }
 
-    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY || "secret!");
-    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET || "secret!");
+    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY);
+    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET);
 
-    if (!providedSecret || (providedSecret !== wipeSecret && providedSecret !== forexSecret)) {
+    if (!providedSecret || ((!wipeSecret || providedSecret !== wipeSecret) && (!forexSecret || providedSecret !== forexSecret))) {
       return res.status(401).json({ error: "Unauthorized: Invalid or missing administrative authorization token." });
     }
 
@@ -2950,8 +3422,8 @@ async function startServer() {
     if (adminApiUrl.startsWith('"') || adminApiUrl.startsWith("'")) {
       adminApiUrl = adminApiUrl.replace(/^['"]|['"]$/g, "").trim();
     }
-    if (!adminApiUrl || adminApiUrl.includes("yourdomain.com") || adminApiUrl.includes("api.yourdomain.com")) {
-      adminApiUrl = "https://firstlook-4iwh.onrender.com/api/admin";
+    if (!adminApiUrl) {
+      return res.status(400).json({ error: "ADMIN_API_URL is required but not configured." });
     }
 
     // Normalize
@@ -3023,10 +3495,10 @@ async function startServer() {
       providedSecret = String(req.headers["x-api-secret"]).trim();
     }
 
-    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY || "secret!");
-    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET || "secret!");
+    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY);
+    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET);
 
-    if (!providedSecret || (providedSecret !== wipeSecret && providedSecret !== forexSecret)) {
+    if (!providedSecret || ((!wipeSecret || providedSecret !== wipeSecret) && (!forexSecret || providedSecret !== forexSecret))) {
       return res.status(401).json({ error: "Unauthorized: Invalid or missing administrative authorization token." });
     }
 
@@ -3034,8 +3506,8 @@ async function startServer() {
     if (adminApiUrl.startsWith('"') || adminApiUrl.startsWith("'")) {
       adminApiUrl = adminApiUrl.replace(/^['"]|['"]$/g, "").trim();
     }
-    if (!adminApiUrl || adminApiUrl.includes("yourdomain.com") || adminApiUrl.includes("api.yourdomain.com")) {
-      adminApiUrl = "https://firstlook-4iwh.onrender.com/api/admin";
+    if (!adminApiUrl) {
+      return res.status(400).json({ error: "ADMIN_API_URL is required but not configured." });
     }
 
     // Normalize
@@ -3112,12 +3584,11 @@ async function startServer() {
       forexSecret = forexSecret.replace(/^['"]|['"]$/g, "").trim();
     }
 
-    // Default to the provided working onrender endpoint if not configured or if using placeholder domain
-    if (!adminApiUrl || adminApiUrl.includes("yourdomain.com") || adminApiUrl.includes("api.yourdomain.com")) {
-      adminApiUrl = "https://firstlook-4iwh.onrender.com/api/admin";
+    if (!adminApiUrl) {
+      return res.status(400).json({ error: "ADMIN_API_URL is required but not configured." });
     }
-    if (!forexSecret || forexSecret === "your-secret") {
-      forexSecret = "secret!";
+    if (!forexSecret) {
+      return res.status(401).json({ error: "FOREX_API_SECRET is required but not configured on the server." });
     }
 
     // Normalize URL: Ensure it ends with /api/admin if it's pointing to firstlook or is just a hostname
@@ -3962,9 +4433,9 @@ async function startServer() {
   // 1.0.1. Verify passcode secret to authorize site access
   app.post("/api/auth/verify", (req: Request, res: Response) => {
     const { secret } = req.body;
-    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY || "secret!");
-    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET || "secret!");
-    const hasMatch = secret && (secret === wipeSecret || secret === forexSecret);
+    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY);
+    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET);
+    const hasMatch = secret && ((wipeSecret && secret === wipeSecret) || (forexSecret && secret === forexSecret));
     res.json({ success: !!hasMatch });
   });
 
@@ -4208,10 +4679,10 @@ async function startServer() {
 
   // 1.5. Wipe Database Data (Real pools + Sandbox memory fallback)
   app.post("/api/db/wipe/supabase", async (req: Request, res: Response) => {
-    const configuredSecret = process.env.DB_WIPE_SECRET_KEY || "secret!";
+    const configuredSecret = process.env.DB_WIPE_SECRET_KEY ? process.env.DB_WIPE_SECRET_KEY.trim() : "";
     const providedSecret = req.body.secret || req.headers["x-wipe-secret"] || req.query.secret;
 
-    if (!providedSecret || providedSecret !== configuredSecret) {
+    if (!configuredSecret || !providedSecret || providedSecret !== configuredSecret) {
       res.status(403).json({ success: false, error: "Incorrect or missing database wipe authorization secret key." });
       return;
     }
@@ -4260,10 +4731,10 @@ async function startServer() {
   });
 
   app.post("/api/db/wipe/cockroach", async (req: Request, res: Response) => {
-    const configuredSecret = process.env.DB_WIPE_SECRET_KEY || "secret!";
+    const configuredSecret = process.env.DB_WIPE_SECRET_KEY ? process.env.DB_WIPE_SECRET_KEY.trim() : "";
     const providedSecret = req.body.secret || req.headers["x-wipe-secret"] || req.query.secret;
 
-    if (!providedSecret || providedSecret !== configuredSecret) {
+    if (!configuredSecret || !providedSecret || providedSecret !== configuredSecret) {
       res.status(403).json({ success: false, error: "Incorrect or missing database wipe authorization secret key." });
       return;
     }
@@ -5831,10 +6302,10 @@ async function startServer() {
 
     // A. Verify Client's API Secret Key
     const incomingSecret = req.headers["x-api-secret"] || req.query.secret || req.query.secret_key;
-    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY || "secret!");
-    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET || "secret!");
+    const wipeSecret = cleanEnvValue(process.env.DB_WIPE_SECRET_KEY);
+    const forexSecret = cleanEnvValue(process.env.FOREX_API_SECRET);
     
-    if (!incomingSecret || (incomingSecret !== wipeSecret && incomingSecret !== forexSecret)) {
+    if (!incomingSecret || ((!wipeSecret || incomingSecret !== wipeSecret) && (!forexSecret || incomingSecret !== forexSecret))) {
       res.status(401).json({ error: "Unauthorized: Invalid or missing administrative x-api-secret key." });
       return;
     }

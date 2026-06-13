@@ -4,7 +4,7 @@ import {
   Clock, ArrowUpRight, ArrowDownRight, Search, Filter, ChevronLeft, ChevronRight, 
   Download, RefreshCw, AlertCircle, Database, Calendar, ArrowUpDown, UserCheck, 
   Smartphone, ShieldCheck, Mail, MapPin, Inbox, CheckCircle2, XCircle, MessageSquare, Send, X, Trash2,
-  Megaphone, UserMinus
+  Megaphone, UserMinus, Star
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { 
@@ -360,6 +360,17 @@ export function AdminDashboard() {
   const [bulkDeleteSuccess, setBulkDeleteSuccess] = useState<string | null>(null);
   const [bulkWipeSecret, setBulkWipeSecret] = useState<string>("");
 
+  // Administrative Email Composer State variables
+  const [isEmailModalOpen, setIsEmailModalOpen] = useState<boolean>(false);
+  const [emailSubject, setEmailSubject] = useState<string>("");
+  const [emailMessage, setEmailMessage] = useState<string>("");
+  const [emailRecipientsMode, setEmailRecipientsMode] = useState<"all" | "custom">("all");
+  const [emailRecipientsText, setEmailRecipientsText] = useState<string>("");
+  const [isSendingEmail, setIsSendingEmail] = useState<boolean>(false);
+  const [emailError, setEmailError] = useState<string | null>(null);
+  const [emailSuccess, setEmailSuccess] = useState<string | null>(null);
+  const [emailSecret, setEmailSecret] = useState<string>("");
+
   // Watchlist specific state variables
   const [isWatchlistCollapsed, setIsWatchlistCollapsed] = useState<boolean>(true);
   const [watchlistItems, setWatchlistItems] = useState<any[]>([]);
@@ -519,19 +530,35 @@ export function AdminDashboard() {
     setBulkDeleteSuccess(null);
 
     // Parse emails to list
-    const parsedEmails = bulkEmailsText
+    let parsedEmails = bulkEmailsText
       .split(/[\n,;]+/)
       .map(e => e.trim())
-      .filter(e => e && e.includes("@"));
+      .filter(e => e);
+
+    const isAll = parsedEmails.some(e => e.toUpperCase() === "ALL" || e === "*");
+
+    if (isAll) {
+      if (!window.confirm("🚨 CRITICAL WARNING: You are initiating a complete database wipe of ALL USERS! This will permanently delete every single user profile in the system. Proceed?")) {
+        return;
+      }
+      if (usersData && usersData.users) {
+        parsedEmails = usersData.users.map((u: any) => u.email).filter(Boolean);
+      } else {
+        setBulkDeleteError("No loaded user registry found to process the 'ALL' command. Refresh the list first.");
+        return;
+      }
+    } else {
+      parsedEmails = parsedEmails.filter(e => e.includes("@"));
+    }
 
     if (parsedEmails.length === 0) {
-      setBulkDeleteError("Please specify at least one valid user email address.");
+      setBulkDeleteError("Please specify at least one valid user email address, or type 'ALL' to delete all users.");
       return;
     }
 
     const passcode = bulkWipeSecret.trim() || localStorage.getItem("forex_site_secret") || "";
     if (!passcode) {
-      setBulkDeleteError("An active administrative passcode (Wipe Secret or Forex Site Secret) is required.");
+      setBulkDeleteError("The active administrative .env secret key passcode (DB_WIPE_SECRET_KEY / FOREX_API_SECRET) is required to authorize this action.");
       return;
     }
 
@@ -564,6 +591,76 @@ export function AdminDashboard() {
       setBulkDeleteError(err.message || "Bulk deletion failed to synchronize profiles on server.");
     } finally {
       setIsProcessingBulkDelete(false);
+    }
+  };
+
+  const handleSendEmail = async () => {
+    setEmailError(null);
+    setEmailSuccess(null);
+
+    const subjectText = emailSubject.trim();
+    const messageText = emailMessage.trim();
+
+    if (!subjectText || !messageText) {
+      setEmailError("Subject and message are required and cannot be empty.");
+      return;
+    }
+
+    let resolvedRecipients: any = "all_users";
+    if (emailRecipientsMode === "custom") {
+      const list = emailRecipientsText
+        .split(/[\n,;]+/)
+        .map(e => e.trim())
+        .filter(e => e && e.includes("@"));
+
+      if (list.length === 0) {
+        setEmailError("Please specify at least one valid recipient email address.");
+        return;
+      }
+      resolvedRecipients = list;
+    }
+
+    const passcode = emailSecret.trim() || localStorage.getItem("forex_site_secret") || "";
+    if (!passcode) {
+      setEmailError("The active administrative .env secret key passcode (DB_WIPE_SECRET_KEY / FOREX_API_SECRET) is required to authenticate this request.");
+      return;
+    }
+
+    setIsSendingEmail(true);
+    try {
+      console.log("[AdminDashboard] Directing send-email proxy request...");
+      const res = await fetch("/api/admin/send-email", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${passcode}`
+        },
+        body: JSON.stringify({
+          subject: subjectText,
+          message: messageText,
+          recipients: resolvedRecipients
+        })
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data.error || `Server responded with status ${res.status}`);
+      }
+
+      console.log("[AdminDashboard] Email proxy successful:", data);
+      setEmailSuccess(data.message || `Successfully sent email to recipients.`);
+      
+      // Clear message field or specific text on success, keep subject as default or empty
+      setEmailMessage("");
+      if (emailRecipientsMode === "custom") {
+        setEmailRecipientsText("");
+      }
+    } catch (err: any) {
+      console.error("[AdminDashboard] Send Email Error:", err);
+      setEmailError(err.message || "Failed to process the email broadcast via remote server.");
+    } finally {
+      setIsSendingEmail(false);
     }
   };
 
@@ -793,6 +890,168 @@ export function AdminDashboard() {
   const [isSupportLoading, setIsSupportLoading] = useState(false);
   const [supportSearch, setSupportSearch] = useState("");
 
+  // FEEDBACK STATE & ACTIONS
+  const [feedbackList, setFeedbackList] = useState<any[]>([]);
+  const [isFeedbackModalOpen, setIsFeedbackModalOpen] = useState(false);
+  const [isFeedbackLoading, setIsFeedbackLoading] = useState(false);
+  const [feedbackFilter, setFeedbackFilter] = useState<"all" | "unread" | "read">("all");
+
+  const refreshFeedbacks = async () => {
+    try {
+      const secret = localStorage.getItem("forex_site_secret") || "";
+      const res = await fetch("/api/admin/feedback", {
+        headers: {
+          "Authorization": `Bearer ${secret}`
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setFeedbackList(data);
+      }
+    } catch (err) {
+      console.error("Failed to load feedbacks:", err);
+    }
+  };
+
+  const markFeedbackAsRead = async (id: string) => {
+    try {
+      const secret = localStorage.getItem("forex_site_secret") || "";
+      const res = await fetch("/api/admin/feedback/mark-read", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${secret}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ id })
+      });
+      if (res.ok) {
+        setFeedbackList(prev => prev.map(f => f.id === id ? { ...f, is_read: true } : f));
+      }
+    } catch (err) {
+      console.error("Failed to mark feedback as read:", err);
+    }
+  };
+
+  const deleteFeedbackItem = async (id: string) => {
+    try {
+      const secret = localStorage.getItem("forex_site_secret") || "";
+      const res = await fetch("/api/admin/feedback/delete", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${secret}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ id })
+      });
+      if (res.ok) {
+        setFeedbackList(prev => prev.filter(f => f.id !== id));
+      }
+    } catch (err) {
+      console.error("Failed to delete feedback item:", err);
+    }
+  };
+
+  const clearAllFeedbackItems = async () => {
+    if (!window.confirm("Are you sure you want to permanently delete ALL feedback records? This is irreversible.")) {
+      return;
+    }
+    try {
+      const secret = localStorage.getItem("forex_site_secret") || "";
+      const res = await fetch("/api/admin/feedback/clear-all", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${secret}`
+        }
+      });
+      if (res.ok) {
+        setFeedbackList([]);
+      }
+    } catch (err) {
+      console.error("Failed to clear feedback items:", err);
+    }
+  };
+
+  // CONTACT STATE & ACTIONS
+  const [contactList, setContactList] = useState<any[]>([]);
+  const [isContactModalOpen, setIsContactModalOpen] = useState(false);
+  const [isContactLoading, setIsContactLoading] = useState(false);
+  const [contactFilter, setContactFilter] = useState<"all" | "unread" | "read">("all");
+
+  const refreshContacts = async () => {
+    try {
+      const secret = localStorage.getItem("forex_site_secret") || "";
+      const res = await fetch("/api/admin/contact", {
+        headers: {
+          "Authorization": `Bearer ${secret}`
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setContactList(data);
+      }
+    } catch (err) {
+      console.error("Failed to load contacts:", err);
+    }
+  };
+
+  const markContactAsRead = async (id: string) => {
+    try {
+      const secret = localStorage.getItem("forex_site_secret") || "";
+      const res = await fetch("/api/admin/contact/mark-read", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${secret}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ id })
+      });
+      if (res.ok) {
+        setContactList(prev => prev.map(c => c.id === id ? { ...c, is_read: true } : c));
+      }
+    } catch (err) {
+      console.error("Failed to mark contact as read:", err);
+    }
+  };
+
+  const deleteContactItem = async (id: string) => {
+    try {
+      const secret = localStorage.getItem("forex_site_secret") || "";
+      const res = await fetch("/api/admin/contact/delete", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${secret}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ id })
+      });
+      if (res.ok) {
+        setContactList(prev => prev.filter(c => c.id !== id));
+      }
+    } catch (err) {
+      console.error("Failed to delete contact item:", err);
+    }
+  };
+
+  const clearAllContactItems = async () => {
+    if (!window.confirm("Are you sure you want to permanently delete ALL contact request records? This is irreversible.")) {
+      return;
+    }
+    try {
+      const secret = localStorage.getItem("forex_site_secret") || "";
+      const res = await fetch("/api/admin/contact/clear-all", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${secret}`
+        }
+      });
+      if (res.ok) {
+        setContactList([]);
+      }
+    } catch (err) {
+      console.error("Failed to clear contact items:", err);
+    }
+  };
+
   const refreshSupportConversations = async () => {
     try {
       const res = await fetch("/api/admin/remote/support/conversations");
@@ -807,8 +1066,12 @@ export function AdminDashboard() {
 
   useEffect(() => {
     refreshSupportConversations();
+    refreshFeedbacks();
+    refreshContacts();
     const interval = setInterval(() => {
       refreshSupportConversations();
+      refreshFeedbacks();
+      refreshContacts();
     }, 5000); // 5-second fast polling
     return () => clearInterval(interval);
   }, []);
@@ -1852,7 +2115,22 @@ export function AdminDashboard() {
                                 <img src={user.avatarUrl} alt={user.name} referrerPolicy="no-referrer" className="h-7 w-7 rounded-none bg-[#141822] border border-[#1E232D]" />
                                 <div className="flex flex-col min-w-0">
                                   <span className="font-bold text-white truncate max-w-[150px]">{user.name}</span>
-                                  <span className="text-[10px] text-slate-400 truncate max-w-[180px]">{user.email}</span>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setEmailRecipientsMode("custom");
+                                      setEmailRecipientsText(user.email);
+                                      setIsEmailModalOpen(true);
+                                      setEmailError(null);
+                                      setEmailSuccess(null);
+                                      setEmailSecret(localStorage.getItem("forex_site_secret") || "");
+                                    }}
+                                    className="text-[10px] text-slate-400 hover:text-indigo-400 font-mono transition text-left cursor-pointer flex items-center gap-1 group/usermail"
+                                    title={`Compose administrative email for ${user.email}`}
+                                  >
+                                    <span className="truncate max-w-[150px] underline decoration-dotted decoration-slate-600 group-hover/usermail:decoration-indigo-400">{user.email}</span>
+                                    <Mail className="h-2.5 w-2.5 opacity-0 group-hover/usermail:opacity-100 transition-opacity text-indigo-400" />
+                                  </button>
                                 </div>
                               </td>
                               <td className="py-3 px-2">
@@ -1909,147 +2187,9 @@ export function AdminDashboard() {
               </div>
             </div>
 
-            {/* BULK DELETE FLOATING ACTION BUTTON */}
-            <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end">
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => {
-                  setIsBulkDeleteOpen(true);
-                  setBulkDeleteError(null);
-                  setBulkDeleteSuccess(null);
-                  setBulkWipeSecret(localStorage.getItem("forex_site_secret") || "");
-                }}
-                className="flex items-center gap-2 px-4 py-3 bg-rose-600 hover:bg-rose-700 text-white font-mono text-[11px] font-bold uppercase tracking-wider border border-rose-500 shadow-xl cursor-pointer"
-                id="bulk-delete-fab"
-                title="Bulk Delete Users by Email"
-              >
-                <Trash2 className="h-4 w-4 animate-pulse" />
-                <span>Bulk Delete Users</span>
-              </motion.button>
-            </div>
 
-            {/* BULK DELETE MODAL */}
-            <AnimatePresence>
-              {isBulkDeleteOpen && (
-                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 overflow-hidden font-mono text-xs">
-                  {/* Backdrop */}
-                  <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    onClick={() => {
-                      if (!isProcessingBulkDelete) {
-                        setIsBulkDeleteOpen(false);
-                      }
-                    }}
-                    className="absolute inset-0 bg-black/80 backdrop-blur-xs"
-                  />
 
-                  {/* Modal Container */}
-                  <motion.div
-                    initial={{ scale: 0.95, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    exit={{ scale: 0.95, opacity: 0 }}
-                    className="relative w-full max-w-lg bg-[#0F1218] border border-[#1E232D] p-6 shadow-2xl z-10 flex flex-col space-y-4 text-slate-300"
-                  >
-                    {/* Header */}
-                    <div className="flex items-center justify-between border-b border-[#1E232D] pb-3">
-                      <div className="flex items-center gap-2">
-                        <Trash2 className="h-4 w-4 text-rose-500" />
-                        <span className="font-bold text-white uppercase tracking-wider text-sm">Bulk Delete Users by Email</span>
-                      </div>
-                      <button
-                        onClick={() => setIsBulkDeleteOpen(false)}
-                        disabled={isProcessingBulkDelete}
-                        className="p-1 text-slate-500 hover:text-slate-300 font-mono text-xs border border-transparent hover:border-[#1E232D]"
-                      >
-                        [ESC]
-                      </button>
-                    </div>
 
-                    {/* Notification Messages */}
-                    {bulkDeleteError && (
-                      <div className="p-3 bg-rose-500/10 border border-rose-500/20 text-rose-400 text-[11px] flex gap-2 items-start">
-                        <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                        <span>{bulkDeleteError}</span>
-                      </div>
-                    )}
-
-                    {bulkDeleteSuccess && (
-                      <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[11px] flex gap-2 items-start">
-                        <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
-                        <span>{bulkDeleteSuccess}</span>
-                      </div>
-                    )}
-
-                    {/* Instructions */}
-                    <div className="text-[10px] text-slate-400 leading-relaxed bg-[#141822]/40 p-3 border border-[#1E232D]/40">
-                      Input the emails of the users you want to wipe permanently. Correct format is one email per line, or comma-separated. The system will look up match profiles and delete them all permanently.
-                    </div>
-
-                    {/* Inputs */}
-                    <div className="space-y-3">
-                      <div>
-                        <label className="text-[9px] text-slate-500 uppercase block mb-1">Emails to Wipe (comma-separated or lines)</label>
-                        <textarea
-                          rows={5}
-                          value={bulkEmailsText}
-                          onChange={(e) => setBulkEmailsText(e.target.value)}
-                          placeholder="user1@example.com&#10;user2@example.com, user3@example.com"
-                          className="w-full bg-[#141822] border border-[#1E232D] p-2.5 text-white focus:border-rose-500 outline-none text-xs font-mono"
-                          disabled={isProcessingBulkDelete}
-                        />
-                      </div>
-
-                      <div>
-                        <label className="text-[9px] text-slate-500 uppercase block mb-1">Administrative Wipe Secret / Passcode</label>
-                        <input
-                          type="password"
-                          value={bulkWipeSecret}
-                          onChange={(e) => setBulkWipeSecret(e.target.value)}
-                          placeholder="Enter DB administrative secret"
-                          className="w-full bg-[#141822] border border-[#1E232D] p-2.5 text-white focus:border-rose-500 outline-none text-xs font-mono"
-                          disabled={isProcessingBulkDelete}
-                        />
-                        <span className="text-[9px] text-slate-500 mt-1 block uppercase">
-                          Matches DB_WIPE_SECRET_KEY or FOREX_API_SECRET
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Footer Actions */}
-                    <div className="flex justify-end gap-3 pt-3 border-t border-[#1E232D]">
-                      <button
-                        onClick={() => setIsBulkDeleteOpen(false)}
-                        disabled={isProcessingBulkDelete}
-                        className="px-4 py-2 border border-[#1E232D] hover:bg-[#1E232D] text-slate-400 font-bold uppercase text-[10px] tracking-wider cursor-pointer"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        onClick={handleBulkDelete}
-                        disabled={isProcessingBulkDelete}
-                        className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold uppercase text-[10px] tracking-wider disabled:opacity-40 flex items-center gap-1.5 cursor-pointer"
-                      >
-                        {isProcessingBulkDelete ? (
-                          <>
-                            <RefreshCw className="h-3 w-3 animate-spin" />
-                            <span>Wiping Profiles...</span>
-                          </>
-                        ) : (
-                          <>
-                            <Trash2 className="h-3 w-3" />
-                            <span>Wipe Users Bulk</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-
-                  </motion.div>
-                </div>
-              )}
-            </AnimatePresence>
 
           </div>
         )}
@@ -2500,7 +2640,22 @@ export function AdminDashboard() {
                       {selectedUser.name}
                       {selectedUser.email_verified && <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0" />}
                     </h3>
-                    <span className="text-[10px] text-slate-400 select-all mt-1">{selectedUser.email}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEmailRecipientsMode("custom");
+                        setEmailRecipientsText(selectedUser.email);
+                        setIsEmailModalOpen(true);
+                        setEmailError(null);
+                        setEmailSuccess(null);
+                        setEmailSecret(localStorage.getItem("forex_site_secret") || "");
+                      }}
+                      className="text-[10px] text-slate-400 hover:text-purple-400 mt-1 cursor-pointer hover:underline flex items-center gap-1 justify-center transition"
+                      title={`Send administrative email to ${selectedUser.email}`}
+                    >
+                      <span>{selectedUser.email}</span>
+                      <Mail className="h-3 w-3 text-purple-400 shrink-0" />
+                    </button>
                     <span className="text-[8px] text-slate-500 uppercase mt-2 select-all font-mono tracking-wider">GUID: {selectedUser.id}</span>
                   </div>
 
@@ -3212,7 +3367,22 @@ export function AdminDashboard() {
                                 <span className={`text-xs font-bold uppercase truncate block ${conv.unreadCount > 0 ? "text-blue-400" : "text-white"}`}>{conv.name}</span>
                                 <span className="text-[8px] font-mono text-slate-500">{new Date(conv.latestAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
                               </div>
-                              <span className="text-[9px] text-slate-500 block truncate font-mono uppercase mt-0.5">{conv.email}</span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEmailRecipientsMode("custom");
+                                  setEmailRecipientsText(conv.email);
+                                  setIsEmailModalOpen(true);
+                                  setEmailError(null);
+                                  setEmailSuccess(null);
+                                  setEmailSecret(localStorage.getItem("forex_site_secret") || "");
+                                }}
+                                className="text-[9px] text-slate-500 hover:text-indigo-400 block truncate font-mono uppercase mt-0.5 text-left cursor-pointer transition hover:underline"
+                                title={`Send administrative email to ${conv.email}`}
+                              >
+                                {conv.email}
+                              </button>
                               <p className="text-[11px] text-slate-400 mt-1 line-clamp-1">
                                 {conv.messages[conv.messages.length - 1]?.message}
                               </p>
@@ -3454,16 +3624,99 @@ export function AdminDashboard() {
                 </div>
               </button>
 
-              {/* Delete User Option (Locked) */}
-              <div className="flex items-center gap-3 p-3 text-left opacity-45 cursor-not-allowed select-none bg-[#07090D]/40">
-                <div className="h-7 w-7 rounded bg-slate-800/30 border border-slate-700/20 flex items-center justify-center shrink-0">
-                  <UserMinus className="h-3.5 w-3.5 text-slate-400" />
+              {/* Bulk Delete Option */}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsBulkDeleteOpen(true);
+                  setIsLauncherMenuOpen(false);
+                  setBulkDeleteError(null);
+                  setBulkDeleteSuccess(null);
+                  setBulkWipeSecret(localStorage.getItem("forex_site_secret") || "");
+                }}
+                className="w-full flex items-center gap-3 p-3 text-left transition hover:bg-[#1E232D]/40 text-rose-400 hover:text-rose-300 cursor-pointer group/opt border-b border-[#1E232D]/35"
+              >
+                <div className="h-7 w-7 rounded bg-rose-500/10 border border-rose-500/25 flex items-center justify-center shrink-0">
+                  <Trash2 className="h-3.5 w-3.5 text-rose-400 animate-pulse" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <span className="text-xs font-bold font-mono uppercase tracking-wide block text-slate-400">DELETE USER</span>
-                  <span className="text-[9px] text-slate-500 font-mono uppercase block truncate mt-0.5">Will be implemented later</span>
+                  <span className="text-xs font-bold font-mono uppercase tracking-wide block text-white">BULK DELETE USER</span>
+                  <span className="text-[9px] text-slate-400 font-mono uppercase block truncate mt-0.5">Wipe accounts by email list or ALL using .env secret</span>
                 </div>
-              </div>
+              </button>
+
+              {/* Send Administrative Email Option */}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsEmailModalOpen(true);
+                  setIsLauncherMenuOpen(false);
+                  setEmailError(null);
+                  setEmailSuccess(null);
+                  setEmailSecret(localStorage.getItem("forex_site_secret") || "");
+                }}
+                className="w-full flex items-center gap-3 p-3 text-left transition hover:bg-[#1E232D]/40 text-indigo-400 hover:text-indigo-300 cursor-pointer group/opt border-b border-[#1E232D]/35"
+              >
+                <div className="h-7 w-7 rounded bg-indigo-500/10 border border-indigo-500/25 flex items-center justify-center shrink-0">
+                  <Mail className="h-3.5 w-3.5 text-indigo-400 animate-pulse" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <span className="text-xs font-bold font-mono uppercase tracking-wide block text-white">ADMIN EMAIL SERVICE</span>
+                  <span className="text-[9px] text-slate-400 font-mono uppercase block truncate mt-0.5">Send bulk emails to all or specific users</span>
+                </div>
+              </button>
+
+              {/* Feedback survey Option */}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsFeedbackModalOpen(true);
+                  setIsLauncherMenuOpen(false);
+                  refreshFeedbacks();
+                }}
+                className="w-full flex items-center gap-3 p-3 text-left transition hover:bg-[#1E232D]/40 text-emerald-400 hover:text-emerald-300 cursor-pointer group/opt border-b border-[#1E232D]/35"
+              >
+                <div className="h-7 w-7 rounded bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center shrink-0">
+                  <Star className="h-3.5 w-3.5 text-emerald-400 animate-pulse" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold font-mono uppercase tracking-wide block text-white">FEEDBACK INDEX</span>
+                    {feedbackList.some(f => !f.is_read) && (
+                      <span className="px-1.5 py-0.5 text-[8px] font-bold font-mono bg-emerald-500 text-white rounded-full leading-none scale-90">
+                        {feedbackList.filter(f => !f.is_read).length}
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-[9px] text-slate-400 font-mono uppercase block truncate mt-0.5">View and analyze ratings & forms</span>
+                </div>
+              </button>
+
+              {/* Contact Us requests Option */}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsContactModalOpen(true);
+                  setIsLauncherMenuOpen(false);
+                  refreshContacts();
+                }}
+                className="w-full flex items-center gap-3 p-3 text-left transition hover:bg-[#1E232D]/40 text-cyan-400 hover:text-cyan-300 cursor-pointer group/opt"
+              >
+                <div className="h-7 w-7 rounded bg-cyan-500/10 border border-cyan-500/25 flex items-center justify-center shrink-0">
+                  <Mail className="h-3.5 w-3.5 text-cyan-400 animate-pulse" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold font-mono uppercase tracking-wide block text-white">CONTACT REQUESTS</span>
+                    {contactList.some(c => !c.is_read) && (
+                      <span className="px-1.5 py-0.5 text-[8px] font-bold font-mono bg-cyan-500 text-white rounded-full leading-none scale-90">
+                        {contactList.filter(c => !c.is_read).length}
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-[9px] text-slate-400 font-mono uppercase block truncate mt-0.5">View fullname, message & subjects</span>
+                </div>
+              </button>
             </motion.div>
           )}
 
@@ -3681,6 +3934,636 @@ export function AdminDashboard() {
           )}
         </AnimatePresence>
 
+        {/* ====================================================================== */}
+        {/* GLOBAL OVERLAYS (BULK DELETE & ADMINISTRATIVE EMAIL COMPOSER) */}
+        {/* ====================================================================== */}
+        <AnimatePresence>
+          {isBulkDeleteOpen && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 overflow-hidden font-mono text-xs">
+              {/* Backdrop */}
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => {
+                  if (!isProcessingBulkDelete) {
+                    setIsBulkDeleteOpen(false);
+                  }
+                }}
+                className="absolute inset-0 bg-black/80 backdrop-blur-xs"
+              />
+
+              {/* Modal Container */}
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="relative w-full max-w-lg bg-[#0F1218] border border-[#1E232D] p-6 shadow-2xl z-10 flex flex-col space-y-4 text-slate-300"
+              >
+                {/* Header */}
+                <div className="flex items-center justify-between border-b border-[#1E232D] pb-3">
+                  <div className="flex items-center gap-2">
+                    <Trash2 className="h-4 w-4 text-rose-500" />
+                    <span className="font-bold text-white uppercase tracking-wider text-sm">Bulk Delete User Registry</span>
+                  </div>
+                  <button
+                    onClick={() => setIsBulkDeleteOpen(false)}
+                    disabled={isProcessingBulkDelete}
+                    className="p-1 text-slate-500 hover:text-slate-300 font-mono text-xs border border-transparent hover:border-[#1E232D] cursor-pointer"
+                  >
+                    [ESC]
+                  </button>
+                </div>
+
+                {/* Notification Messages */}
+                {bulkDeleteError && (
+                  <div className="p-3 bg-rose-500/10 border border-rose-500/20 text-rose-400 text-[11px] flex gap-2 items-start font-sans">
+                    <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                    <span>{bulkDeleteError}</span>
+                  </div>
+                )}
+
+                {bulkDeleteSuccess && (
+                  <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[11px] flex gap-2 items-start font-sans">
+                    <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+                    <span>{bulkDeleteSuccess}</span>
+                  </div>
+                )}
+
+                {/* Instructions */}
+                <div className="text-[10px] text-slate-400 leading-relaxed bg-[#141822]/40 p-3 border border-[#1E232D]/40">
+                  Input the emails of the users you want to delete permanently. To delete <strong>ALL USERS</strong> in the database, type <strong>ALL</strong> in the text field. This is irreversible.
+                </div>
+
+                {/* Inputs */}
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-[9px] text-slate-500 uppercase block mb-1">Emails to Wipe (comma-separated, lines, or type "ALL")</label>
+                    <textarea
+                      rows={5}
+                      value={bulkEmailsText}
+                      onChange={(e) => setBulkEmailsText(e.target.value)}
+                      placeholder="user1@example.com&#10;user2@example.com, user3@example.com&#10;Or type: ALL"
+                      className="w-full bg-[#141822] border border-[#1E232D] p-2.5 text-white focus:border-rose-500 outline-none text-xs font-mono"
+                      disabled={isProcessingBulkDelete}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[9px] text-slate-500 uppercase block mb-1">Administrative .env Secret Key (DB_WIPE_SECRET_KEY / FOREX_API_SECRET)</label>
+                    <input
+                      type="password"
+                      value={bulkWipeSecret}
+                      onChange={(e) => setBulkWipeSecret(e.target.value)}
+                      placeholder="Enter your .env administrative secret"
+                      className="w-full bg-[#141822] border border-[#1E232D] p-2.5 text-white focus:border-rose-500 outline-none text-xs font-mono"
+                      disabled={isProcessingBulkDelete}
+                    />
+                    <span className="text-[9px] text-slate-500 mt-1 block uppercase">
+                      Required for security validation and to authorize deletions
+                    </span>
+                  </div>
+                </div>
+
+                {/* Footer Actions */}
+                <div className="flex justify-end gap-3 pt-3 border-t border-[#1E232D]">
+                  <button
+                    onClick={() => setIsBulkDeleteOpen(false)}
+                    disabled={isProcessingBulkDelete}
+                    className="px-4 py-2 border border-[#1E232D] hover:bg-[#1E232D] text-slate-400 font-bold uppercase text-[10px] tracking-wider cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleBulkDelete}
+                    disabled={isProcessingBulkDelete}
+                    className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold uppercase text-[10px] tracking-wider disabled:opacity-40 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {isProcessingBulkDelete ? (
+                      <>
+                        <RefreshCw className="h-3 w-3 animate-spin" />
+                        <span>Wiping Profiles...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Trash2 className="h-3 w-3" />
+                        <span>Confirm Wipe Action</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {isEmailModalOpen && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 overflow-hidden font-sans text-xs">
+              {/* Backdrop */}
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => {
+                  if (!isSendingEmail) {
+                    setIsEmailModalOpen(false);
+                  }
+                }}
+                className="absolute inset-0 bg-black/80 backdrop-blur-xs"
+              />
+
+              {/* Modal Container */}
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="relative w-full max-w-lg bg-[#0F1218] border border-[#1E232D] p-6 shadow-2xl z-10 flex flex-col space-y-4 text-slate-300"
+              >
+                {/* Header */}
+                <div className="flex items-center justify-between border-b border-[#1E232D]/80 pb-3">
+                  <div className="flex items-center gap-2">
+                    <Mail className="h-4 w-4 text-indigo-400" />
+                    <span className="font-bold text-white uppercase tracking-wider text-xs font-mono">Administrative Email Composer</span>
+                  </div>
+                  <button
+                    onClick={() => setIsEmailModalOpen(false)}
+                    disabled={isSendingEmail}
+                    className="p-1 text-slate-500 hover:text-slate-300 font-mono text-[10px] border border-transparent hover:border-[#1E232D] cursor-pointer"
+                  >
+                    [ESC]
+                  </button>
+                </div>
+
+                {/* Notification Messages */}
+                {emailError && (
+                  <div className="p-3 bg-rose-500/10 border border-rose-500/20 text-rose-400 text-[11px] flex gap-2 items-start">
+                    <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                    <span className="leading-normal">{emailError}</span>
+                  </div>
+                )}
+
+                {emailSuccess && (
+                  <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[11px] flex gap-2 items-start">
+                    <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+                    <span className="leading-normal">{emailSuccess}</span>
+                  </div>
+                )}
+
+                {/* Mode Selection Tabs (All Users vs Specific Users) */}
+                <div className="grid grid-cols-2 gap-2 border-b border-[#1E232D]/40 pb-2">
+                  <button
+                    type="button"
+                    onClick={() => setEmailRecipientsMode("all")}
+                    className={`py-2 text-center text-[10px] font-bold font-mono uppercase border transition cursor-pointer ${
+                      emailRecipientsMode === "all"
+                        ? "bg-indigo-500/10 border-indigo-500/40 text-indigo-300"
+                        : "border-[#1E232D] hover:bg-[#1E232D]/60 text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    👥 Broadcast All Users
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEmailRecipientsMode("custom")}
+                    className={`py-2 text-center text-[10px] font-bold font-mono uppercase border transition cursor-pointer ${
+                      emailRecipientsMode === "custom"
+                        ? "bg-indigo-500/10 border-indigo-500/40 text-indigo-300"
+                        : "border-[#1E232D] hover:bg-[#1E232D]/60 text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    🎯 Target Specific Recipient(s)
+                  </button>
+                </div>
+
+                {/* Inputs */}
+                <div className="space-y-3 font-mono text-[11px]">
+                  {emailRecipientsMode === "custom" && (
+                    <div>
+                      <label className="text-[9px] text-slate-500 uppercase block mb-1">Recipient Email Address(es)</label>
+                      <textarea
+                        rows={2}
+                        value={emailRecipientsText}
+                        onChange={(e) => setEmailRecipientsText(e.target.value)}
+                        placeholder="user1@example.com&#10;user2@example.com, user3@example.com"
+                        className="w-full bg-[#141822] border border-[#1E232D] p-2.5 text-white focus:border-indigo-500 outline-none text-xs"
+                        disabled={isSendingEmail}
+                      />
+                      <span className="text-[8px] text-slate-500 block uppercase mt-0.5">Separate multiple targets using lines, commas, or semicolons</span>
+                    </div>
+                  )}
+
+                  {emailRecipientsMode === "all" && (
+                    <div className="p-2.5 bg-indigo-500/5 border border-indigo-500/10 text-[10px] text-indigo-400 leading-relaxed uppercase">
+                      📢 Broadcasting is enabled. This will safely forward dispatch commands to the remote server to deliver to all registered accounts.
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="text-[9px] text-slate-500 uppercase block mb-1">Email Subject Line</label>
+                    <input
+                      type="text"
+                      value={emailSubject}
+                      onChange={(e) => setEmailSubject(e.target.value)}
+                      placeholder="e.g., Scheduled Performance Optimization Block"
+                      className="w-full bg-[#141822] border border-[#1E232D] p-2.5 text-white focus:border-indigo-500 outline-none text-xs"
+                      disabled={isSendingEmail}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[9px] text-slate-500 uppercase block mb-1">Message Body</label>
+                    <textarea
+                      rows={6}
+                      value={emailMessage}
+                      onChange={(e) => setEmailMessage(e.target.value)}
+                      placeholder="Hi team,&#10;&#10;We are rolling out an optimization patch. No downtime is expected.&#10;&#10;Best,&#10;FirstLook Labs"
+                      className="w-full bg-[#141822] border border-[#1E232D] p-2.5 text-white focus:border-indigo-500 outline-none text-xs"
+                      disabled={isSendingEmail}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[9px] text-slate-500 uppercase block mb-1">Administrative .env Secret Key (FOREX_API_SECRET)</label>
+                    <input
+                      type="password"
+                      value={emailSecret}
+                      onChange={(e) => setEmailSecret(e.target.value)}
+                      placeholder="Enter administrative server secret to confirm"
+                      className="w-full bg-[#141822] border border-[#1E232D] p-2.5 text-white focus:border-indigo-500 outline-none text-xs"
+                      disabled={isSendingEmail}
+                    />
+                  </div>
+                </div>
+
+                {/* Footer Actions */}
+                <div className="flex justify-end gap-3 pt-3 border-t border-[#1E232D] font-mono text-[10px]">
+                  <button
+                    onClick={() => setIsEmailModalOpen(false)}
+                    disabled={isSendingEmail}
+                    className="px-4 py-2 border border-[#1E232D] hover:bg-[#1E232D] text-slate-400 font-bold uppercase tracking-wider cursor-pointer transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSendEmail}
+                    disabled={isSendingEmail}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold uppercase tracking-wider disabled:opacity-40 flex items-center gap-1.5 cursor-pointer transition"
+                  >
+                    {isSendingEmail ? (
+                      <>
+                        <RefreshCw className="h-3 w-3 animate-spin" />
+                        <span>Dispatching Mail...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="h-3 w-3" />
+                        <span>Dispatch Email</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* FEEDBACK MANAGEMENT SYSTEM DIALOG */}
+        <AnimatePresence>
+          {isFeedbackModalOpen && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/85 backdrop-blur-md z-[70] flex items-center justify-center p-4 text-slate-100 font-sans"
+            >
+              <motion.div
+                initial={{ scale: 0.95, y: 15 }}
+                animate={{ scale: 1, y: 0 }}
+                className="bg-[#090C11] border border-[#1E232D]/95 shadow-2xl rounded-xl w-full max-w-4xl max-h-[85vh] overflow-hidden flex flex-col"
+              >
+                {/* Header */}
+                <div className="bg-[#0E121A] px-4 py-3.5 border-b border-[#1E232D] flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <Star className="h-5 w-5 text-emerald-500 animate-pulse" />
+                    <div>
+                      <h3 className="text-xs font-bold uppercase tracking-widest text-white">FEEDBACK SURVEY GATEWAY</h3>
+                      <p className="text-[9px] text-slate-400 uppercase font-mono mt-0.5">Core client ratings and qualitative remarks database</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={refreshFeedbacks}
+                      className="p-1.5 hover:bg-[#1E232D] text-slate-400 hover:text-white transition rounded border border-[#1E232D]/80 flex items-center gap-1 cursor-pointer font-mono text-[9px] uppercase font-bold"
+                    >
+                      <RefreshCw className="h-3 w-3" /> reload
+                    </button>
+                    {feedbackList.length > 0 && (
+                      <button
+                        onClick={clearAllFeedbackItems}
+                        className="p-1.5 bg-rose-950/20 hover:bg-rose-900/40 text-rose-400 border border-rose-900/40 hover:border-rose-500/30 transition rounded flex items-center gap-1 cursor-pointer font-mono text-[9px] uppercase font-bold"
+                      >
+                        <Trash2 className="h-3 w-3" /> Wipe DB
+                      </button>
+                    )}
+                    <button 
+                      onClick={() => setIsFeedbackModalOpen(false)}
+                      className="p-1.5 hover:bg-[#1E232D] text-slate-400 hover:text-white transition rounded-md border border-[#1E232D]/50 cursor-pointer"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Filters */}
+                <div className="p-3 border-b border-[#1E232D]/60 bg-[#07090D] flex items-center justify-between text-[9px] font-mono uppercase tracking-wider">
+                  <div className="flex gap-1.5">
+                    {(["all", "unread", "read"] as const).map(tab => {
+                      const count = tab === "unread" 
+                        ? feedbackList.filter(f => !f.is_read).length
+                        : tab === "read"
+                        ? feedbackList.filter(f => f.is_read).length
+                        : feedbackList.length;
+
+                      return (
+                        <button
+                          key={tab}
+                          onClick={() => setFeedbackFilter(tab)}
+                          className={`px-3 py-1.5 font-bold rounded cursor-pointer transition ${feedbackFilter === tab ? "bg-emerald-600/20 text-emerald-400 border border-emerald-500/30" : "text-slate-400 hover:text-white hover:bg-[#141A24]/40 border border-transparent"}`}
+                        >
+                          {tab} ({count})
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="text-slate-500">
+                    Real-time aggregated streams
+                  </div>
+                </div>
+
+                {/* Content Stream */}
+                <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-[#07090D] space-y-3">
+                  {(() => {
+                    const filtered = feedbackList.filter(f => {
+                      if (feedbackFilter === "unread") return !f.is_read;
+                      if (feedbackFilter === "read") return f.is_read;
+                      return true;
+                    });
+
+                    if (filtered.length === 0) {
+                      return (
+                        <div className="flex flex-col items-center justify-center py-20 text-center text-slate-500 font-mono text-[10px] space-y-2 uppercase">
+                          <Inbox className="h-8 w-8 text-slate-700 block" />
+                          <span>No client reviews matching status index</span>
+                        </div>
+                      );
+                    }
+
+                    return filtered.map(item => (
+                      <div 
+                        key={item.id}
+                        className={`p-4 rounded-lg border flex flex-col md:flex-row md:items-center justify-between gap-4 transition duration-150 ${item.is_read ? "border-[#1E232D] bg-[#090C11]/50" : "border-emerald-500/25 bg-[#0A1312]/60"}`}
+                      >
+                        <div className="flex-1 min-w-0 space-y-2">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {/* Stars rating */}
+                            <div className="flex items-center gap-0.5 py-0.5 px-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded">
+                              {Array.from({ length: 5 }).map((_, i) => (
+                                <Star 
+                                  key={i} 
+                                  className={`h-2.5 w-2.5 ${i < item.rate ? "text-emerald-400 fill-emerald-400" : "text-slate-705"}`} 
+                                />
+                              ))}
+                              <span className="text-[9px] font-mono font-bold text-emerald-400 ml-1 mt-0.5">{item.rate}/5</span>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEmailRecipientsMode("custom");
+                                setEmailRecipientsText(item.user_email);
+                                setIsEmailModalOpen(true);
+                                setEmailError(null);
+                                setEmailSuccess(null);
+                                setEmailSecret(localStorage.getItem("forex_site_secret") || "");
+                              }}
+                              className="text-[9px] font-mono text-slate-400 hover:text-indigo-400 transition hover:underline bg-[#12161F] border border-[#1E232D] px-2 py-0.5 rounded uppercase cursor-pointer"
+                              title="Directly Draft Email to sender"
+                            >
+                              ✉ {item.user_email}
+                            </button>
+
+                            <span className="text-[8px] font-mono text-slate-500 uppercase">
+                              {new Date(item.created_at).toLocaleString()}
+                            </span>
+
+                            {!item.is_read && (
+                              <span className="px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 text-[8px] font-mono font-bold uppercase rounded border border-emerald-500/30">
+                                NEW FEED
+                              </span>
+                            )}
+                          </div>
+
+                          <p className="text-xs text-slate-300 leading-relaxed font-sans font-normal whitespace-pre-wrap select-text">
+                            {item.feedback}
+                          </p>
+                        </div>
+
+                        {/* Actions */}
+                        <div className="flex items-center gap-2 font-mono text-[9px] uppercase shrink-0">
+                          {!item.is_read && (
+                            <button
+                              onClick={() => markFeedbackAsRead(item.id)}
+                              className="px-2.5 py-1.5 bg-[#12161F] hover:bg-emerald-600 hover:text-white text-slate-300 border border-[#1E232D] hover:border-emerald-500 rounded cursor-pointer transition font-bold"
+                            >
+                              Mark Read
+                            </button>
+                          )}
+                          <button
+                            onClick={() => deleteFeedbackItem(item.id)}
+                            className="p-1.5 bg-rose-950/20 hover:bg-rose-900/40 text-rose-400 border border-rose-900/40 hover:border-rose-500/30 rounded cursor-pointer transition"
+                            title="Delete custom review"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* CONTACT MESSAGES CHANNEL DIALOG */}
+        <AnimatePresence>
+          {isContactModalOpen && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/85 backdrop-blur-md z-[70] flex items-center justify-center p-4 text-slate-100 font-sans"
+            >
+              <motion.div
+                initial={{ scale: 0.95, y: 15 }}
+                animate={{ scale: 1, y: 0 }}
+                className="bg-[#090C11] border border-[#1E232D]/95 shadow-2xl rounded-xl w-full max-w-4xl max-h-[85vh] overflow-hidden flex flex-col"
+              >
+                {/* Header */}
+                <div className="bg-[#0E121A] px-4 py-3.5 border-b border-[#1E232D] flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <Mail className="h-5 w-5 text-cyan-500 animate-pulse" />
+                    <div>
+                      <h3 className="text-xs font-bold uppercase tracking-widest text-white">CONTACT REAL-TIME GATEWAY</h3>
+                      <p className="text-[9px] text-slate-400 uppercase font-mono mt-0.5">Aggregate logs of offline enquiries and subjects</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={refreshContacts}
+                      className="p-1.5 hover:bg-[#1E232D] text-slate-400 hover:text-white transition rounded border border-[#1E232D]/80 flex items-center gap-1 cursor-pointer font-mono text-[9px] uppercase font-bold"
+                    >
+                      <RefreshCw className="h-3 w-3" /> reload
+                    </button>
+                    {contactList.length > 0 && (
+                      <button
+                        onClick={clearAllContactItems}
+                        className="p-1.5 bg-rose-950/20 hover:bg-rose-900/40 text-rose-400 border border-rose-900/40 hover:border-rose-500/30 transition rounded flex items-center gap-1 cursor-pointer font-mono text-[9px] uppercase font-bold"
+                      >
+                        <Trash2 className="h-3 w-3" /> Wipe DB
+                      </button>
+                    )}
+                    <button 
+                      onClick={() => setIsContactModalOpen(false)}
+                      className="p-1.5 hover:bg-[#1E232D] text-slate-400 hover:text-white transition rounded-md border border-[#1E232D]/50 cursor-pointer"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Filters */}
+                <div className="p-3 border-b border-[#1E232D]/60 bg-[#07090D] flex items-center justify-between text-[9px] font-mono uppercase tracking-wider">
+                  <div className="flex gap-1.5">
+                    {(["all", "unread", "read"] as const).map(tab => {
+                      const count = tab === "unread" 
+                        ? contactList.filter(c => !c.is_read).length
+                        : tab === "read"
+                        ? contactList.filter(c => c.is_read).length
+                        : contactList.length;
+
+                      return (
+                        <button
+                          key={tab}
+                          onClick={() => setContactFilter(tab)}
+                          className={`px-3 py-1.5 font-bold rounded cursor-pointer transition ${contactFilter === tab ? "bg-cyan-600/20 text-cyan-400 border border-cyan-500/30" : "text-slate-400 hover:text-white hover:bg-[#141A24]/40 border border-transparent"}`}
+                        >
+                          {tab} ({count})
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="text-slate-500">
+                    Secure database pipelines
+                  </div>
+                </div>
+
+                {/* Content Stream */}
+                <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-[#07090D] space-y-3">
+                  {(() => {
+                    const filtered = contactList.filter(c => {
+                      if (contactFilter === "unread") return !c.is_read;
+                      if (contactFilter === "read") return c.is_read;
+                      return true;
+                    });
+
+                    if (filtered.length === 0) {
+                      return (
+                        <div className="flex flex-col items-center justify-center py-20 text-center text-slate-500 font-mono text-[10px] space-y-2 uppercase">
+                          <Inbox className="h-8 w-8 text-slate-700 block" />
+                          <span>No offline messages matching index filters</span>
+                        </div>
+                      );
+                    }
+
+                    return filtered.map(item => (
+                      <div 
+                        key={item.id}
+                        className={`p-4 rounded-lg border flex flex-col md:flex-row md:items-start justify-between gap-4 transition duration-150 ${item.is_read ? "border-[#1E232D] bg-[#090C11]/50" : "border-cyan-500/25 bg-[#091114]/60"}`}
+                      >
+                        <div className="flex-grow min-w-0 space-y-2">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-xs font-bold text-white uppercase font-sans">
+                              👤 {item.fullname}
+                            </span>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEmailRecipientsMode("custom");
+                                setEmailRecipientsText(item.usermail);
+                                setIsEmailModalOpen(true);
+                                setEmailError(null);
+                                setEmailSuccess(null);
+                                setEmailSecret(localStorage.getItem("forex_site_secret") || "");
+                              }}
+                              className="text-[9px] font-mono text-slate-400 hover:text-indigo-400 transition hover:underline bg-[#12161F] border border-[#1E232D] px-2 py-0.5 rounded uppercase cursor-pointer"
+                              title="Directly Draft Email to sender"
+                            >
+                              ✉ {item.usermail}
+                            </button>
+
+                            <span className="text-[8px] font-mono text-slate-500 uppercase">
+                              {new Date(item.created_at).toLocaleString()}
+                            </span>
+
+                            {!item.is_read && (
+                              <span className="px-1.5 py-0.5 bg-cyan-500/20 text-cyan-400 text-[8px] font-mono font-bold uppercase rounded border border-cyan-500/30">
+                                NEW MESSAGE
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="p-2.5 bg-[#12161E]/40 border border-[#1E232D]/40 rounded">
+                            <span className="text-[9px] font-mono text-slate-300 block uppercase tracking-wider mb-1 font-bold">
+                              Subject: {item.subject}
+                            </span>
+                            <p className="text-xs text-slate-300 leading-relaxed font-sans font-normal whitespace-pre-wrap select-text">
+                              {item.message}
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Actions */}
+                        <div className="flex items-center gap-2 font-mono text-[9px] uppercase shrink-0 pt-1 md:pt-0">
+                          {!item.is_read && (
+                            <button
+                              onClick={() => markContactAsRead(item.id)}
+                              className="px-2.5 py-1.5 bg-[#12161F] hover:bg-cyan-600 hover:text-white text-slate-300 border border-[#1E232D] hover:border-cyan-500 rounded cursor-pointer transition font-bold"
+                            >
+                              Mark Read
+                            </button>
+                          )}
+                          <button
+                            onClick={() => deleteContactItem(item.id)}
+                            className="p-1.5 bg-rose-950/20 hover:bg-rose-900/40 text-rose-400 border border-rose-900/40 hover:border-rose-500/30 rounded cursor-pointer transition"
+                            title="Delete custom message"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* RE-INITIALIZED COMPACT LAUNCHER CIRCLE */}
         <button
           onClick={() => {
@@ -3701,9 +4584,9 @@ export function AdminDashboard() {
           )}
 
           {/* PULSING COMPREHENSIVE UNREAD CONVERSATIONS BADGE */}
-          {supportConversations.some(m => m.sender === "user" && !m.is_read) && !isLauncherMenuOpen && !isSupportOpen && (
+          {(supportConversations.some(m => m.sender === "user" && !m.is_read) || feedbackList.some(f => !f.is_read) || contactList.some(c => !c.is_read)) && !isLauncherMenuOpen && !isSupportOpen && !isFeedbackModalOpen && !isContactModalOpen && (
             <span className="absolute -top-1 -right-1 h-4 min-w-[16px] bg-rose-600 text-[8px] font-bold font-mono px-1 rounded-full text-white flex items-center justify-center shadow animate-bounce">
-              {supportConversations.filter(m => m.sender === "user" && !m.is_read).length}
+              {supportConversations.filter(m => m.sender === "user" && !m.is_read).length + feedbackList.filter(f => !f.is_read).length + contactList.filter(c => !c.is_read).length}
             </span>
           )}
         </button>
